@@ -41,36 +41,107 @@ const WORKSPACE_DIR =
   path.join(STATE_DIR, "workspace");
 
 // Sync repo-managed Tegridy files into the persistent OpenClaw workspace.
-// For now GitHub/repo is the source of truth on each new Railway deployment.
-// This can later be upgraded to version-aware sync when Telegram admin editing is enabled.
+// knowledge_base.json uses version-aware sync so live admin updates survive deployments.
+// AGENTS.md and workspace skills remain repo-managed and sync from each deployment.
 (function syncWorkspaceFiles() {
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
-  const filesToSync = [
-    ["knowledge_base.json", "knowledge_base.json"],
-    ["AGENTS.md", "AGENTS.md"],
-  ];
+  const appKb = "/app/knowledge_base.json";
+  const workspaceKb = path.join(WORKSPACE_DIR, "knowledge_base.json");
 
-  for (const [sourceName, targetName] of filesToSync) {
-    const source = path.join("/app", sourceName);
-    const target = path.join(WORKSPACE_DIR, targetName);
+  // --- Knowledge base: version-aware sync ---
+  // The newest KB wins. This prevents a Railway deploy from overwriting
+  // a newer KB that was updated live by an authorized Telegram admin.
+  try {
+    if (!fs.existsSync(appKb)) {
+      console.warn(`[workspace-sync] Source not found: ${appKb}`);
+    } else if (!fs.existsSync(workspaceKb)) {
+      fs.copyFileSync(appKb, workspaceKb);
+      console.log("[workspace-sync] Installed packaged knowledge_base.json");
+    } else {
+      const appData = JSON.parse(fs.readFileSync(appKb, "utf8"));
+      const workspaceData = JSON.parse(fs.readFileSync(workspaceKb, "utf8"));
 
-    try {
-      if (!fs.existsSync(source)) {
-        console.warn(`[workspace-sync] Source not found: ${source}`);
-        continue;
+      const appVersion =
+        Number.isFinite(Number(appData.version))
+          ? Number(appData.version)
+          : 0;
+
+      const workspaceVersion =
+        Number.isFinite(Number(workspaceData.version))
+          ? Number(workspaceData.version)
+          : 0;
+
+      if (appVersion > workspaceVersion) {
+        fs.copyFileSync(
+          workspaceKb,
+          `${workspaceKb}.pre-deploy-backup`
+        );
+
+        fs.copyFileSync(appKb, workspaceKb);
+
+        console.log(
+          `[workspace-sync] Updated knowledge_base.json from repo v${appVersion} ` +
+          `(workspace was v${workspaceVersion})`
+        );
+      } else if (workspaceVersion > appVersion) {
+        console.log(
+          `[workspace-sync] Keeping newer workspace knowledge_base.json v${workspaceVersion} ` +
+          `(repo is v${appVersion})`
+        );
+      } else {
+        console.log(
+          `[workspace-sync] knowledge_base.json already at v${workspaceVersion}`
+        );
       }
-
-      // Keep a backup of the current persistent file before replacing it.
-      if (fs.existsSync(target)) {
-        fs.copyFileSync(target, `${target}.pre-deploy-backup`);
-      }
-
-      fs.copyFileSync(source, target);
-      console.log(`[workspace-sync] Synced ${sourceName} → ${target}`);
-    } catch (err) {
-      console.error(`[workspace-sync] Failed to sync ${sourceName}: ${err}`);
     }
+  } catch (err) {
+    console.error(
+      `[workspace-sync] Failed knowledge_base.json sync: ${err}`
+    );
+  }
+
+  // --- AGENTS.md: repo remains authoritative ---
+  const appAgents = "/app/AGENTS.md";
+  const workspaceAgents = path.join(WORKSPACE_DIR, "AGENTS.md");
+
+  try {
+    if (!fs.existsSync(appAgents)) {
+      console.warn(`[workspace-sync] Source not found: ${appAgents}`);
+    } else {
+      if (fs.existsSync(workspaceAgents)) {
+        fs.copyFileSync(
+          workspaceAgents,
+          `${workspaceAgents}.pre-deploy-backup`
+        );
+      }
+
+      fs.copyFileSync(appAgents, workspaceAgents);
+      console.log("[workspace-sync] Synced AGENTS.md");
+    }
+  } catch (err) {
+    console.error(`[workspace-sync] Failed AGENTS.md sync: ${err}`);
+  }
+
+  // --- Workspace skills: repo remains authoritative ---
+  const appSkills = "/app/skills";
+  const workspaceSkills = path.join(WORKSPACE_DIR, "skills");
+
+  try {
+    if (!fs.existsSync(appSkills)) {
+      console.warn(`[workspace-sync] Source not found: ${appSkills}`);
+    } else {
+      fs.mkdirSync(workspaceSkills, { recursive: true });
+
+      fs.cpSync(appSkills, workspaceSkills, {
+        recursive: true,
+        force: true,
+      });
+
+      console.log("[workspace-sync] Synced workspace skills");
+    }
+  } catch (err) {
+    console.error(`[workspace-sync] Failed skills sync: ${err}`);
   }
 })();
 
