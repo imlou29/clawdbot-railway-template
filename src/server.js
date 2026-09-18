@@ -42,7 +42,7 @@ const WORKSPACE_DIR =
 
 // Sync repo-managed Tegridy files into the persistent OpenClaw workspace.
 // knowledge_base.json uses version-aware sync so live admin updates survive deployments.
-// AGENTS.md and workspace skills remain repo-managed and sync from each deployment.
+// AGENTS.md, LORE.md, and workspace skills remain repo-managed and sync from each deployment.
 (function syncWorkspaceFiles() {
   fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 
@@ -123,6 +123,27 @@ const WORKSPACE_DIR =
     console.error(`[workspace-sync] Failed AGENTS.md sync: ${err}`);
   }
 
+  // --- LORE.md: repo remains authoritative ---
+const appLore = "/app/LORE.md";
+const workspaceLore = path.join(WORKSPACE_DIR, "LORE.md");
+
+try {
+  if (!fs.existsSync(appLore)) {
+    console.warn(`[workspace-sync] Source not found: ${appLore}`);
+  } else {
+    if (fs.existsSync(workspaceLore)) {
+      fs.copyFileSync(
+        workspaceLore,
+        `${workspaceLore}.pre-deploy-backup`
+      );
+    }
+
+    fs.copyFileSync(appLore, workspaceLore);
+    console.log("[workspace-sync] Synced LORE.md");
+  }
+} catch (err) {
+  console.error(`[workspace-sync] Failed LORE.md sync: ${err}`);
+}
   // --- Workspace skills: repo remains authoritative ---
   const appSkills = "/app/skills";
   const workspaceSkills = path.join(WORKSPACE_DIR, "skills");
