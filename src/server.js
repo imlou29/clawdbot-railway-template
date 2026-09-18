@@ -40,6 +40,40 @@ const WORKSPACE_DIR =
   process.env.OPENCLAW_WORKSPACE_DIR?.trim() ||
   path.join(STATE_DIR, "workspace");
 
+// Sync repo-managed Tegridy files into the persistent OpenClaw workspace.
+// For now GitHub/repo is the source of truth on each new Railway deployment.
+// This can later be upgraded to version-aware sync when Telegram admin editing is enabled.
+(function syncWorkspaceFiles() {
+  fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
+
+  const filesToSync = [
+    ["knowledge_base.json", "knowledge_base.json"],
+    ["AGENTS.md", "AGENTS.md"],
+  ];
+
+  for (const [sourceName, targetName] of filesToSync) {
+    const source = path.join("/app", sourceName);
+    const target = path.join(WORKSPACE_DIR, targetName);
+
+    try {
+      if (!fs.existsSync(source)) {
+        console.warn(`[workspace-sync] Source not found: ${source}`);
+        continue;
+      }
+
+      // Keep a backup of the current persistent file before replacing it.
+      if (fs.existsSync(target)) {
+        fs.copyFileSync(target, `${target}.pre-deploy-backup`);
+      }
+
+      fs.copyFileSync(source, target);
+      console.log(`[workspace-sync] Synced ${sourceName} → ${target}`);
+    } catch (err) {
+      console.error(`[workspace-sync] Failed to sync ${sourceName}: ${err}`);
+    }
+  }
+})();
+
 // Protect /setup with a user-provided password.
 const SETUP_PASSWORD = process.env.SETUP_PASSWORD?.trim();
 
