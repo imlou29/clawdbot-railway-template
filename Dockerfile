@@ -79,6 +79,7 @@ RUN printf '%s\n' '#!/usr/bin/env bash' 'exec node /openclaw/dist/entry.js "$@"'
 COPY src ./src
 COPY knowledge_base.json /app/knowledge_base.json
 COPY AGENTS.md /app/AGENTS.md
+COPY LORE.md /app/LORE.md
 COPY skills /app/skills
 
 # The wrapper listens on $PORT.
