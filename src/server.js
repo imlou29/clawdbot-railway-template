@@ -262,6 +262,49 @@ function isConfigured() {
 
 let gatewayProc = null;
 let gatewayStarting = null;
+let gatewayRestartTimer = null;
+let wrapperShuttingDown = false;
+const intentionallyStoppedGatewayProcs = new WeakSet();
+
+function cancelGatewayRestartTimer() {
+  if (gatewayRestartTimer) {
+    clearTimeout(gatewayRestartTimer);
+    gatewayRestartTimer = null;
+  }
+}
+
+function markGatewayStopIntentional(proc) {
+  if (proc && typeof proc === "object") {
+    intentionallyStoppedGatewayProcs.add(proc);
+  }
+}
+
+function scheduleGatewayRestart(reason = "unexpected exit") {
+  if (wrapperShuttingDown || !isConfigured() || gatewayRestartTimer || gatewayProc || gatewayStarting) {
+    return;
+  }
+
+  console.warn(`[gateway] ${reason}; scheduling automatic restart in 5s`);
+
+  gatewayRestartTimer = setTimeout(async () => {
+    gatewayRestartTimer = null;
+
+    if (wrapperShuttingDown || !isConfigured() || gatewayProc || gatewayStarting) {
+      return;
+    }
+
+    try {
+      console.log("[gateway] attempting automatic restart...");
+      await ensureGatewayRunning();
+      console.log("[gateway] automatic restart successful");
+    } catch (err) {
+      console.error(`[gateway] automatic restart failed: ${String(err)}`);
+      scheduleGatewayRestart("automatic restart failed");
+    }
+  }, 5000);
+
+  gatewayRestartTimer.unref?.();
+}
 
 // Debug breadcrumbs for common Railway failures (502 / "Application failed to respond").
 let lastGatewayError = null;
@@ -326,18 +369,42 @@ async function startGateway() {
     },
   });
 
-  gatewayProc.on("error", (err) => {
+  const proc = gatewayProc;
+
+  proc.on("error", (err) => {
     const msg = `[gateway] spawn error: ${String(err)}`;
     console.error(msg);
     lastGatewayError = msg;
-    gatewayProc = null;
+
+    if (gatewayProc === proc) {
+      gatewayProc = null;
+    }
+
+    const intentional = intentionallyStoppedGatewayProcs.has(proc) || wrapperShuttingDown;
+    if (!intentional) {
+      scheduleGatewayRestart("spawn error");
+    }
   });
 
-  gatewayProc.on("exit", (code, signal) => {
+  proc.on("exit", (code, signal) => {
+    const intentional = intentionallyStoppedGatewayProcs.has(proc) || wrapperShuttingDown;
     const msg = `[gateway] exited code=${code} signal=${signal}`;
     console.error(msg);
-    lastGatewayExit = { code, signal, at: new Date().toISOString() };
-    gatewayProc = null;
+
+    lastGatewayExit = {
+      code,
+      signal,
+      at: new Date().toISOString(),
+      intentional,
+    };
+
+    if (gatewayProc === proc) {
+      gatewayProc = null;
+    }
+
+    if (!intentional) {
+      scheduleGatewayRestart(`unexpected exit code=${code} signal=${signal}`);
+    }
   });
 }
 
@@ -384,16 +451,26 @@ async function ensureGatewayRunning() {
 }
 
 async function restartGateway() {
-  if (gatewayProc) {
+  cancelGatewayRestartTimer();
+
+  const proc = gatewayProc;
+  if (proc) {
+    markGatewayStopIntentional(proc);
+
     try {
-      gatewayProc.kill("SIGTERM");
+      proc.kill("SIGTERM");
     } catch {
       // ignore
     }
+
     // Give it a moment to exit and release the port.
     await sleep(750);
-    gatewayProc = null;
+
+    if (gatewayProc === proc) {
+      gatewayProc = null;
+    }
   }
+
   return ensureGatewayRunning();
 }
 
@@ -1130,11 +1207,19 @@ app.post("/setup/api/console/run", requireSetupAuth, async (req, res) => {
       return res.json({ ok: true, output: "Gateway restarted (wrapper-managed).\n" });
     }
     if (cmd === "gateway.stop") {
-      if (gatewayProc) {
-        try { gatewayProc.kill("SIGTERM"); } catch {}
+      cancelGatewayRestartTimer();
+
+      const proc = gatewayProc;
+      if (proc) {
+        markGatewayStopIntentional(proc);
+        try { proc.kill("SIGTERM"); } catch {}
         await sleep(750);
-        gatewayProc = null;
+
+        if (gatewayProc === proc) {
+          gatewayProc = null;
+        }
       }
+
       return res.json({ ok: true, output: "Gateway stopped (wrapper-managed).\n" });
     }
     if (cmd === "gateway.start") {
@@ -1276,10 +1361,17 @@ app.post("/setup/api/reset", requireSetupAuth, async (_req, res) => {
   try {
     // Stop gateway to avoid running gateway + onboard concurrently on small Railway instances.
     try {
-      if (gatewayProc) {
-        try { gatewayProc.kill("SIGTERM"); } catch {}
+      cancelGatewayRestartTimer();
+
+      const proc = gatewayProc;
+      if (proc) {
+        markGatewayStopIntentional(proc);
+        try { proc.kill("SIGTERM"); } catch {}
         await sleep(750);
-        gatewayProc = null;
+
+        if (gatewayProc === proc) {
+          gatewayProc = null;
+        }
       }
     } catch {
       // ignore
@@ -1394,10 +1486,17 @@ app.post("/setup/import", requireSetupAuth, async (req, res) => {
     }
 
     // Stop gateway before restore so we don't overwrite live files.
-    if (gatewayProc) {
-      try { gatewayProc.kill("SIGTERM"); } catch {}
+    cancelGatewayRestartTimer();
+
+    const proc = gatewayProc;
+    if (proc) {
+      markGatewayStopIntentional(proc);
+      try { proc.kill("SIGTERM"); } catch {}
       await sleep(750);
-      gatewayProc = null;
+
+      if (gatewayProc === proc) {
+        gatewayProc = null;
+      }
     }
 
     const buf = await readBodyBuffer(req, 250 * 1024 * 1024); // 250MB max
@@ -1605,9 +1704,15 @@ server.on("upgrade", async (req, socket, head) => {
 });
 
 process.on("SIGTERM", () => {
+  wrapperShuttingDown = true;
+  cancelGatewayRestartTimer();
+
   // Best-effort shutdown
   try {
-    if (gatewayProc) gatewayProc.kill("SIGTERM");
+    if (gatewayProc) {
+      markGatewayStopIntentional(gatewayProc);
+      gatewayProc.kill("SIGTERM");
+    }
   } catch {
     // ignore
   }
