@@ -5,7 +5,7 @@ import path from "node:path";
 const BASE_URL = "https://www.peptegridy.com/coas";
 const CACHE_TTL_MS = 120_000;
 const CACHE_FILE = process.env.TEGRIDY_COA_CACHE_FILE || "/tmp/tegridy-coa-cache.json";
-const UA = "TegridyAI-COA-Lookup/0.2 (+https://www.peptegridy.com/coas)";
+const UA = "TegridyAI-COA-Lookup/0.3 (+https://www.peptegridy.com/coas)";
 
 function parseArgs(argv) {
   const out = { query: "", groupBuy: "", noCache: false, debug: false };
@@ -38,9 +38,7 @@ function stripTags(html = "") {
       .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
       .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
       .replace(/<[^>]+>/g, " ")
-  )
-    .replace(/\s+/g, " ")
-    .trim();
+  ).replace(/\s+/g, " ").trim();
 }
 
 function normalize(s = "") {
@@ -104,11 +102,7 @@ function extractBatchUrls(html) {
     const href = new URL(decodeHtml(m[1]), BASE_URL).toString();
     urls.set(slug, href);
   }
-  return [...urls.entries()].map(([slug, url]) => ({
-    slug,
-    label: slugLabel(slug),
-    url,
-  }));
+  return [...urls.entries()].map(([slug, url]) => ({ slug, label: slugLabel(slug), url }));
 }
 
 function fieldFromText(text, labels) {
@@ -126,15 +120,10 @@ function cleanProduct(raw = "") {
     .replace(/^P\s+/i, "")
     .replace(/^PEPTEGRIDY RESEARCH PEPTIDES\s+/i, "")
     .trim();
-
-  // Prefer the final human-readable product label after "RESEARCH USE ONLY".
   const ru = s.match(/RESEARCH USE ONLY\s+(.+)$/i);
   if (ru?.[1]) s = ru[1].trim();
-
-  // If the title was duplicated before the vendor string, keep the concise trailing label.
   const repeated = s.match(/(?:^|\s)([A-Za-z0-9+.-]+(?:\s+[A-Za-z0-9+().-]+){0,5}\s+\d+(?:\.\d+)?\s*mg(?:\s*\([^)]*\))?)$/i);
   if (repeated?.[1]) s = repeated[1].trim();
-
   return s.replace(/\s+/g, " ").trim();
 }
 
@@ -148,7 +137,6 @@ function deriveProduct(text) {
 function splitLabAndCoa(rawLab = "", rawCoa = "") {
   let lab = rawLab.trim();
   let coaNumber = rawCoa.trim();
-
   const embedded = lab.match(/^(.*?)\s+COA\s*#\s*(.+)$/i);
   if (embedded) {
     lab = embedded[1].trim();
@@ -160,7 +148,6 @@ function splitLabAndCoa(rawLab = "", rawCoa = "") {
 function extractBatchFields(text, rawBatch = "") {
   let batchLabel = "";
   let batchId = "";
-
   if (/^\d+$/.test(rawBatch.trim())) batchLabel = `Batch ${rawBatch.trim()}`;
   else if (/^batch\s+\d+$/i.test(rawBatch.trim())) batchLabel = rawBatch.trim().replace(/^batch/i, "Batch");
   else if (rawBatch.trim()) batchId = rawBatch.trim();
@@ -169,7 +156,6 @@ function extractBatchFields(text, rawBatch = "") {
     /\b([A-Z][A-Z0-9-]{2,}-[A-Z0-9-]*\d[A-Z0-9-]*)\b/g,
     /\b([A-Z]+-[A-Z0-9]+-\d{4})\b/g,
   ];
-
   for (const re of idPatterns) {
     const hits = [...text.matchAll(re)].map((m) => m[1]).filter((x) => /-/.test(x));
     const preferred = hits.find((x) => !/^V\d/i.test(x) && !/^COA/i.test(x));
@@ -181,7 +167,6 @@ function extractBatchFields(text, rawBatch = "") {
 
   const labelMatch = text.match(/\bBatch\s+(\d+)\b/i);
   if (!batchLabel && labelMatch) batchLabel = `Batch ${labelMatch[1]}`;
-
   return { batchLabel, batchId };
 }
 
@@ -201,7 +186,6 @@ function extractRecordsFromBatchHtml(html, batchInfo) {
     const end = anchors[i].index;
     const start = i === 0 ? Math.max(0, end - 18_000) : anchors[i - 1].index + 1;
     let chunk = html.slice(start, end);
-
     const boundaries = [
       /(?:<article\b|<section\b|<div\b)[^>]*(?:card|report|coa)[^>]*>/gi,
       /(?:FINISHED BUY|SHIPPING|GROUP BUY)/gi,
@@ -297,19 +281,14 @@ function scoreRecord(record, query, groupBuy) {
     else if (gb.includes(g) || g.includes(gb) || gs.includes(g)) score += 30;
     else score -= 100;
   }
-
   return score;
 }
 
-function rankedMatches(records, query, groupBuy) {
-  return records
+function chooseMatches(records, query, groupBuy) {
+  const ranked = records
     .map((record) => ({ record, score: scoreRecord(record, query, groupBuy) }))
     .filter((x) => x.score >= 35)
     .sort((a, b) => b.score - a.score);
-}
-
-function chooseMatches(records, query, groupBuy) {
-  const ranked = rankedMatches(records, query, groupBuy);
   if (!ranked.length) return [];
   const best = ranked[0].score;
   return ranked
@@ -317,18 +296,23 @@ function chooseMatches(records, query, groupBuy) {
     .map((x) => x.record);
 }
 
-function candidateGroupBuys(records, query) {
-  const ranked = rankedMatches(records, query, "");
-  if (!ranked.length) return [];
-  const best = ranked[0].score;
-  const close = ranked.filter((x) => x.score >= Math.max(35, best - 18)).map((x) => x.record.groupBuy);
-  return [...new Set(close)];
-}
-
 const args = parseArgs(process.argv.slice(2));
 if (!args.query) {
-  console.error('Usage: node coa-lookup.mjs --query "Product name" [--group-buy "June 26 GB"] [--no-cache] [--debug]');
+  console.error('Usage: node coa-lookup.mjs --query "Product name" --group-buy "June 26 GB" [--no-cache] [--debug]');
   process.exit(2);
+}
+
+// Never infer a GB. Asking the user is faster and safer than searching first.
+if (!args.groupBuy) {
+  console.log(JSON.stringify({
+    status: "needs_group_buy",
+    query: args.query,
+    groupBuy: null,
+    source: BASE_URL,
+    elapsedMs: 0,
+    matches: [],
+  }, null, 2));
+  process.exit(0);
 }
 
 const started = Date.now();
@@ -344,28 +328,11 @@ try {
     saveCache(live.records, live.pages);
   }
 
-  const groupBuys = args.groupBuy ? [] : candidateGroupBuys(cache.records, args.query);
-
-  if (!args.groupBuy && groupBuys.length > 1) {
-    console.log(JSON.stringify({
-      status: "needs_group_buy",
-      query: args.query,
-      groupBuy: null,
-      source: BASE_URL,
-      liveDataAgeSeconds: Math.max(0, Math.round((Date.now() - Number(cache.fetchedAt || Date.now())) / 1000)),
-      cache: cacheStatus,
-      elapsedMs: Date.now() - started,
-      availableGroupBuys: groupBuys,
-      matches: [],
-    }, null, 2));
-    process.exit(0);
-  }
-
   const matches = chooseMatches(cache.records, args.query, args.groupBuy);
-  const result = {
+  console.log(JSON.stringify({
     status: matches.length === 0 ? "not_found" : matches.length === 1 ? "found" : "multiple",
     query: args.query,
-    groupBuy: args.groupBuy || groupBuys[0] || null,
+    groupBuy: args.groupBuy,
     source: BASE_URL,
     liveDataAgeSeconds: Math.max(0, Math.round((Date.now() - Number(cache.fetchedAt || Date.now())) / 1000)),
     cache: cacheStatus,
@@ -381,14 +348,12 @@ try {
       quantity: r.quantity || null,
       url: r.url,
     })),
-  };
-
-  console.log(JSON.stringify(result, null, 2));
+  }, null, 2));
 } catch (err) {
   console.log(JSON.stringify({
     status: "error",
     query: args.query,
-    groupBuy: args.groupBuy || null,
+    groupBuy: args.groupBuy,
     source: BASE_URL,
     elapsedMs: Date.now() - started,
     error: String(err?.message || err),
