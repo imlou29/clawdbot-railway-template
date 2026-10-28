@@ -5,7 +5,7 @@ import path from "node:path";
 const BASE_URL = "https://www.peptegridy.com/coas";
 const CACHE_TTL_MS = 120_000;
 const CACHE_FILE = process.env.TEGRIDY_COA_CACHE_FILE || "/tmp/tegridy-coa-cache.json";
-const UA = "TegridyAI-COA-Lookup/0.1 (+https://www.peptegridy.com/coas)";
+const UA = "TegridyAI-COA-Lookup/0.2 (+https://www.peptegridy.com/coas)";
 
 function parseArgs(argv) {
   const out = { query: "", groupBuy: "", noCache: false, debug: false };
@@ -88,14 +88,10 @@ function saveCache(records, pages) {
   try {
     fs.mkdirSync(path.dirname(CACHE_FILE), { recursive: true });
     const tmp = `${CACHE_FILE}.${process.pid}.tmp`;
-    fs.writeFileSync(
-      tmp,
-      JSON.stringify({ fetchedAt: Date.now(), records, pages }, null, 2),
-      "utf8"
-    );
+    fs.writeFileSync(tmp, JSON.stringify({ fetchedAt: Date.now(), records, pages }, null, 2), "utf8");
     fs.renameSync(tmp, CACHE_FILE);
   } catch {
-    // Cache is an optimization only; live lookup must still work if it cannot be written.
+    // Cache is an optimization only.
   }
 }
 
@@ -124,11 +120,69 @@ function fieldFromText(text, labels) {
   return "";
 }
 
+function cleanProduct(raw = "") {
+  let s = raw
+    .replace(/^Finished buy\s+/i, "")
+    .replace(/^P\s+/i, "")
+    .replace(/^PEPTEGRIDY RESEARCH PEPTIDES\s+/i, "")
+    .trim();
+
+  // Prefer the final human-readable product label after "RESEARCH USE ONLY".
+  const ru = s.match(/RESEARCH USE ONLY\s+(.+)$/i);
+  if (ru?.[1]) s = ru[1].trim();
+
+  // If the title was duplicated before the vendor string, keep the concise trailing label.
+  const repeated = s.match(/(?:^|\s)([A-Za-z0-9+.-]+(?:\s+[A-Za-z0-9+().-]+){0,5}\s+\d+(?:\.\d+)?\s*mg(?:\s*\([^)]*\))?)$/i);
+  if (repeated?.[1]) s = repeated[1].trim();
+
+  return s.replace(/\s+/g, " ").trim();
+}
+
 function deriveProduct(text) {
   const cleaned = text.replace(/\bView COA\b[\s\S]*$/i, "").trim();
   const beforeFields = cleaned.split(/\b(?:PEPTIDE|LAB|BATCH|TESTED|REPORT DETAILS|COA\s*#|PURITY|QUANTITY)\b/i)[0].trim();
   const bits = beforeFields.split(/\s{2,}|\|/).map((x) => x.trim()).filter(Boolean);
-  return bits.at(-1) || beforeFields || "";
+  return cleanProduct(bits.at(-1) || beforeFields || "");
+}
+
+function splitLabAndCoa(rawLab = "", rawCoa = "") {
+  let lab = rawLab.trim();
+  let coaNumber = rawCoa.trim();
+
+  const embedded = lab.match(/^(.*?)\s+COA\s*#\s*(.+)$/i);
+  if (embedded) {
+    lab = embedded[1].trim();
+    if (!coaNumber) coaNumber = embedded[2].trim();
+  }
+  return { lab, coaNumber };
+}
+
+function extractBatchFields(text, rawBatch = "") {
+  let batchLabel = "";
+  let batchId = "";
+
+  if (/^\d+$/.test(rawBatch.trim())) batchLabel = `Batch ${rawBatch.trim()}`;
+  else if (/^batch\s+\d+$/i.test(rawBatch.trim())) batchLabel = rawBatch.trim().replace(/^batch/i, "Batch");
+  else if (rawBatch.trim()) batchId = rawBatch.trim();
+
+  const idPatterns = [
+    /\b([A-Z][A-Z0-9-]{2,}-[A-Z0-9-]*\d[A-Z0-9-]*)\b/g,
+    /\b([A-Z]+-[A-Z0-9]+-\d{4})\b/g,
+  ];
+
+  for (const re of idPatterns) {
+    const hits = [...text.matchAll(re)].map((m) => m[1]).filter((x) => /-/.test(x));
+    const preferred = hits.find((x) => !/^V\d/i.test(x) && !/^COA/i.test(x));
+    if (preferred) {
+      batchId = preferred;
+      break;
+    }
+  }
+
+  const labelMatch = text.match(/\bBatch\s+(\d+)\b/i);
+  if (!batchLabel && labelMatch) batchLabel = `Batch ${labelMatch[1]}`;
+
+  return { batchLabel, batchId };
 }
 
 function extractRecordsFromBatchHtml(html, batchInfo) {
@@ -148,7 +202,6 @@ function extractRecordsFromBatchHtml(html, batchInfo) {
     const start = i === 0 ? Math.max(0, end - 18_000) : anchors[i - 1].index + 1;
     let chunk = html.slice(start, end);
 
-    // Prefer the nearest card-like container by trimming to the last likely report heading boundary.
     const boundaries = [
       /(?:<article\b|<section\b|<div\b)[^>]*(?:card|report|coa)[^>]*>/gi,
       /(?:FINISHED BUY|SHIPPING|GROUP BUY)/gi,
@@ -162,19 +215,22 @@ function extractRecordsFromBatchHtml(html, batchInfo) {
 
     const text = stripTags(chunk);
     const product = deriveProduct(text);
-    const lab = fieldFromText(text, ["LAB"]);
-    const batch = fieldFromText(text, ["BATCH"]);
+    const rawLab = fieldFromText(text, ["LAB"]);
+    const rawBatch = fieldFromText(text, ["BATCH"]);
     const tested = fieldFromText(text, ["TESTED"]);
     const purity = fieldFromText(text, ["PURITY"]);
     const quantity = fieldFromText(text, ["QUANTITY"]);
-    const coaNumber = fieldFromText(text, ["COA\\s*#"]);
+    const rawCoa = fieldFromText(text, ["COA\\s*#"]);
+    const { lab, coaNumber } = splitLabAndCoa(rawLab, rawCoa);
+    const { batchLabel, batchId } = extractBatchFields(text, rawBatch);
 
     records.push({
       groupBuy: batchInfo.label,
       groupBuySlug: batchInfo.slug,
       product,
       lab,
-      batch,
+      batchLabel,
+      batchId,
       tested,
       purity,
       quantity,
@@ -184,16 +240,13 @@ function extractRecordsFromBatchHtml(html, batchInfo) {
     });
   }
 
-  // De-duplicate exact View COA URLs.
   return [...new Map(records.map((r) => [r.url, r])).values()];
 }
 
 async function buildLiveIndex(debug = false) {
   const baseHtml = await fetchText(BASE_URL);
   const batchUrls = extractBatchUrls(baseHtml);
-  if (!batchUrls.length) {
-    throw new Error("No batch links were discoverable on the live COA page");
-  }
+  if (!batchUrls.length) throw new Error("No batch links were discoverable on the live COA page");
 
   const records = [];
   const pages = [];
@@ -209,9 +262,7 @@ async function buildLiveIndex(debug = false) {
     }
   }
 
-  if (!records.length) {
-    throw new Error("Live COA pages were reachable, but no View COA records could be extracted");
-  }
+  if (!records.length) throw new Error("Live COA pages were reachable, but no View COA records could be extracted");
   return { records, pages };
 }
 
@@ -222,7 +273,8 @@ function scoreRecord(record, query, groupBuy) {
   const haystack = normalize([
     record.product,
     record.groupBuy,
-    record.batch,
+    record.batchLabel,
+    record.batchId,
     record.lab,
     record.coaNumber,
   ].join(" "));
@@ -243,18 +295,21 @@ function scoreRecord(record, query, groupBuy) {
     const gs = normalize(record.groupBuySlug);
     if (gb === g || gs === g) score += 50;
     else if (gb.includes(g) || g.includes(gb) || gs.includes(g)) score += 30;
-    else score -= 40;
+    else score -= 100;
   }
 
   return score;
 }
 
-function chooseMatches(records, query, groupBuy) {
-  const ranked = records
+function rankedMatches(records, query, groupBuy) {
+  return records
     .map((record) => ({ record, score: scoreRecord(record, query, groupBuy) }))
     .filter((x) => x.score >= 35)
     .sort((a, b) => b.score - a.score);
+}
 
+function chooseMatches(records, query, groupBuy) {
+  const ranked = rankedMatches(records, query, groupBuy);
   if (!ranked.length) return [];
   const best = ranked[0].score;
   return ranked
@@ -262,9 +317,17 @@ function chooseMatches(records, query, groupBuy) {
     .map((x) => x.record);
 }
 
+function candidateGroupBuys(records, query) {
+  const ranked = rankedMatches(records, query, "");
+  if (!ranked.length) return [];
+  const best = ranked[0].score;
+  const close = ranked.filter((x) => x.score >= Math.max(35, best - 18)).map((x) => x.record.groupBuy);
+  return [...new Set(close)];
+}
+
 const args = parseArgs(process.argv.slice(2));
 if (!args.query) {
-  console.error("Usage: node coa-lookup.mjs --query \"Product name\" [--group-buy \"June 26 GB\"] [--no-cache] [--debug]");
+  console.error('Usage: node coa-lookup.mjs --query "Product name" [--group-buy "June 26 GB"] [--no-cache] [--debug]');
   process.exit(2);
 }
 
@@ -281,11 +344,28 @@ try {
     saveCache(live.records, live.pages);
   }
 
+  const groupBuys = args.groupBuy ? [] : candidateGroupBuys(cache.records, args.query);
+
+  if (!args.groupBuy && groupBuys.length > 1) {
+    console.log(JSON.stringify({
+      status: "needs_group_buy",
+      query: args.query,
+      groupBuy: null,
+      source: BASE_URL,
+      liveDataAgeSeconds: Math.max(0, Math.round((Date.now() - Number(cache.fetchedAt || Date.now())) / 1000)),
+      cache: cacheStatus,
+      elapsedMs: Date.now() - started,
+      availableGroupBuys: groupBuys,
+      matches: [],
+    }, null, 2));
+    process.exit(0);
+  }
+
   const matches = chooseMatches(cache.records, args.query, args.groupBuy);
   const result = {
     status: matches.length === 0 ? "not_found" : matches.length === 1 ? "found" : "multiple",
     query: args.query,
-    groupBuy: args.groupBuy || null,
+    groupBuy: args.groupBuy || groupBuys[0] || null,
     source: BASE_URL,
     liveDataAgeSeconds: Math.max(0, Math.round((Date.now() - Number(cache.fetchedAt || Date.now())) / 1000)),
     cache: cacheStatus,
@@ -293,8 +373,10 @@ try {
     matches: matches.map((r) => ({
       groupBuy: r.groupBuy,
       product: r.product,
-      batch: r.batch || null,
+      batchLabel: r.batchLabel || null,
+      batchId: r.batchId || null,
       lab: r.lab || null,
+      coaNumber: r.coaNumber || null,
       purity: r.purity || null,
       quantity: r.quantity || null,
       url: r.url,
