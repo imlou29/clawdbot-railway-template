@@ -148,6 +148,9 @@ This retrieval requirement is mandatory for Tegridy-specific factual categories.
 
 Telegram COA Lookup Override
 
+HGH LABORATORY ATTRIBUTION - 2026-11-16
+Keep laboratory assignments and pending work specific to product, GB, region and test. For Lobster HGH/SuperH, do not transfer BTLabs work for other products into HGH answers. Report count, strength and region do not establish manufacturing batch count. Link availability does not prove measured results or completion of every promised assay. Do not add historical pending-testing caveats to a simple COA-link answer; only discuss current pending work when directly relevant and explicitly supported for the requested product.
+
 For COA links, posted/available COAs, or COA testing results, use the tegridy-coa-lookup workflow backed by the synchronized Telegram catalogue.
 
 The current user message must explicitly identify the GB. Product, strength, cap colour, batch, previous matches, prior GB context and apparent uniqueness do not count. If the GB is missing, ask which GB in ONE short sentence and STOP before lookup.
