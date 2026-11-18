@@ -1,0 +1,21 @@
+name: COA report context migration
+on:
+  pull_request:
+    paths:
+      - scripts/update-rt10-context.mjs
+      - .github/workflows/coa-report-context.yml
+  push:
+    branches: [main]
+    paths:
+      - scripts/update-rt10-context.mjs
+      - .github/workflows/coa-report-context.yml
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --check scripts/update-rt10-context.mjs
+      - run: node scripts/update-rt10-context.mjs --self-test
