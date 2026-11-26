@@ -1337,15 +1337,31 @@ function requireDashboardAuth(req, res, next) {
   if (!SETUP_PASSWORD) return next(); // no password configured → open
   const header = req.headers.authorization || "";
   const [scheme, encoded] = header.split(" ");
+  const isControlUiResource =
+    req.method === "GET" &&
+    (req.path === "/control-ui-config.json" ||
+      /^\/__openclaw__\/workspace-icon\/[\w:-]+(?:%3A[\w:-]+)*$/i.test(req.path) ||
+      /^\/api\/users\/[\w-]+\/avatar$/.test(req.path));
+
+  // Browser fetches may carry the Gateway token instead of HTTP Basic auth.
+  // Accept that credential only on the known read-only Control UI resources.
+  if (isControlUiResource && scheme === "Bearer" && OPENCLAW_GATEWAY_TOKEN) {
+    const supplied = Buffer.from(encoded || "", "utf8");
+    const expected = Buffer.from(OPENCLAW_GATEWAY_TOKEN, "utf8");
+    if (supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected)) {
+      return next();
+    }
+  }
+
   if (scheme !== "Basic" || !encoded) {
-    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
+    if (!isControlUiResource) res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
     return res.status(401).send("Auth required");
   }
   const decoded = Buffer.from(encoded, "base64").toString("utf8");
   const idx = decoded.indexOf(":");
   const password = idx >= 0 ? decoded.slice(idx + 1) : "";
   if (password !== SETUP_PASSWORD) {
-    res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
+    if (!isControlUiResource) res.set("WWW-Authenticate", 'Basic realm="OpenClaw Dashboard"');
     return res.status(401).send("Invalid password");
   }
   return next();
